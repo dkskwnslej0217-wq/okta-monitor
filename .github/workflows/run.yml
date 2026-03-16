@@ -1,9 +1,10 @@
 name: stock-check
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: "*/30 * * * *"
-  workflow_dispatch:
+
 jobs:
   run-script:
     runs-on: ubuntu-latest
@@ -17,7 +18,7 @@ jobs:
           python-version: "3.10"
 
       - name: Install packages
-        run: pip install yfinance pandas
+        run: pip install yfinance
 
       - name: Run script
         run: python okta_check.py
