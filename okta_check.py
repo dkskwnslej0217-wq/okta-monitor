@@ -4,7 +4,7 @@ import pandas as pd
 ticker = "OKTA"
 
 data = yf.download(ticker, period="400d", interval="1d")
-
+data = data.dropna()
 data["MA200"] = data["Close"].rolling(200).mean()
 data["MA240"] = data["Close"].rolling(240).mean()
 
