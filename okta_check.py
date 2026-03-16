@@ -17,7 +17,8 @@ if isinstance(data.columns, pd.MultiIndex):
 
 data = data.dropna()
 
-close = pd.to_numeric(data["Close"], errors="coerce").dropna()
+close = data["Close"].squeeze()
+close = pd.to_numeric(close, errors="coerce").dropna()
 
 ma200_series = close.rolling(200).mean()
 ma240_series = close.rolling(240).mean()
