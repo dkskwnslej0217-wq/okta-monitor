@@ -3,25 +3,33 @@ import pandas as pd
 
 ticker = "OKTA"
 
-data = yf.download(ticker, period="400d", interval="1d")
+data = yf.download(
+    ticker,
+    period="400d",
+    interval="1d",
+    auto_adjust=False,
+    progress=False
+)
+
+# yfinance가 멀티인덱스 컬럼으로 줄 때 대비
+if isinstance(data.columns, pd.MultiIndex):
+    data.columns = data.columns.get_level_values(0)
+
 data = data.dropna()
 
-close = data["Close"]
+close = pd.to_numeric(data["Close"], errors="coerce").dropna()
 
-# 이동평균 계산
-data["MA200"] = close.rolling(200).mean()
-data["MA240"] = close.rolling(240).mean()
+ma200_series = close.rolling(200).mean()
+ma240_series = close.rolling(240).mean()
 
-# 마지막 값만 가져오기 (float)
 price = float(close.iloc[-1])
-ma200 = float(data["MA200"].iloc[-1])
-ma240 = float(data["MA240"].iloc[-1])
+ma200 = float(ma200_series.iloc[-1])
+ma240 = float(ma240_series.iloc[-1])
 
 print("현재가격:", price)
 print("200일선:", ma200)
 print("240일선:", ma240)
 
-# 매수 조건
 if price > ma200 and price > ma240 and ma200 > ma240:
     print("매수조건 충족")
 else:
