@@ -3,7 +3,7 @@ name: stock-check
 on:
   schedule:
     - cron: "*/30 * * * *"
-
+  workflow_dispatch:
 jobs:
   run-script:
     runs-on: ubuntu-latest
