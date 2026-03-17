@@ -1,5 +1,7 @@
 import os
 import math
+from datetime import datetime, timedelta
+
 import requests
 import pandas as pd
 import yfinance as yf
@@ -23,6 +25,12 @@ CORE_MIN_SHARES = {
     "AMT": 1,
     "KMI": 1,
     "UNH": 1,
+}
+
+CORE_TICKERS = {"PANW", "CRWD", "AMT", "KMI", "UNH"}
+
+ETF_LIKE_TICKERS = {
+    "TLT", "GLD", "SPY", "QQQ", "DIA", "IWM", "UFO", "BOTZ", "ARKG", "QTUM"
 }
 
 DEFAULT_WATCHLIST = [
@@ -166,6 +174,40 @@ def load_watchlist() -> list[tuple[str, str]]:
         return DEFAULT_WATCHLIST
 
 
+def load_trade_log() -> pd.DataFrame:
+    try:
+        df = load_sheet("TRADE_LOG")
+        df.columns = normalize_columns(df.columns)
+        required = {"date", "ticker", "action", "shares"}
+        if not required.issubset(set(df.columns)):
+            return pd.DataFrame(columns=["date", "ticker", "action", "shares"])
+        df["ticker"] = df["ticker"].astype(str).str.upper().str.strip()
+        df["action"] = df["action"].astype(str).str.upper().str.strip()
+        df["shares"] = df["shares"].apply(clean_number)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["date", "ticker", "action", "shares"])
+
+
+def bought_recently(ticker: str, trade_log: pd.DataFrame, days: int = 5) -> bool:
+    if trade_log.empty:
+        return False
+
+    cutoff = datetime.utcnow().date() - timedelta(days=days)
+    rows = trade_log[(trade_log["ticker"] == ticker) & (trade_log["action"] == "BUY")]
+    if rows.empty:
+        return False
+
+    for _, row in rows.iterrows():
+        try:
+            d = datetime.strptime(str(row["date"])[:10], "%Y-%m-%d").date()
+            if d >= cutoff:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def get_history(ticker: str, period: str = "1y") -> tuple[pd.Series, pd.Series]:
     try:
         df = yf.download(
@@ -251,6 +293,13 @@ def compare_vs_benchmark(ticker: str, benchmark: str, period: str = "6mo") -> di
 
 
 def fundamental_detail(ticker: str) -> dict:
+    if ticker in ETF_LIKE_TICKERS:
+        return {
+            "status": "중립",
+            "score": 0,
+            "notes": ["ETF/채권형 종목"],
+        }
+
     try:
         info = yf.Ticker(ticker).info
 
@@ -305,10 +354,9 @@ def fundamental_detail(ticker: str) -> dict:
                 score -= 1
                 notes.append("현금흐름 약함")
 
-        if debt_to_equity is not None:
-            if debt_to_equity > 200:
-                score -= 1
-                notes.append("부채 부담")
+        if debt_to_equity is not None and debt_to_equity > 200:
+            score -= 1
+            notes.append("부채 부담")
 
         if score >= 4:
             status = "양호"
@@ -588,6 +636,9 @@ def rate_candidate(ticker: str, sector: str, usdkrw: float, portfolio: dict, pre
     elif info["fundamental"] == "보통":
         score += 5
         reasons.append("실적 보통")
+    elif info["fundamental"] == "중립":
+        score += 3
+        reasons.append("ETF/채권형")
     else:
         score -= 15
         reasons.append("실적 약함")
@@ -654,7 +705,7 @@ def rebalance_engine(portfolio: dict, usdkrw: float) -> dict:
     values = {}
     total = 0
 
-    for ticker, data in portfolio.items():
+    for ticker, _ in portfolio.items():
         info = snapshot(ticker, usdkrw, portfolio)
         if not info:
             continue
@@ -689,11 +740,12 @@ def risk_scan_portfolio(portfolio: dict, usdkrw: float) -> list[dict]:
         tech_weak = info["ma200"] is not None and info["price_usd"] < info["ma200"]
         rel_weak = info["qqq60"] is not None and info["qqq60"] <= -8
 
-        if info["fundamental"] == "약함":
-            risk_score += 35
-            reasons.append("실적 약화")
-        elif info["fundamental"] == "보통":
-            risk_score += 10
+        if ticker not in ETF_LIKE_TICKERS:
+            if info["fundamental"] == "약함":
+                risk_score += 35
+                reasons.append("실적 약화")
+            elif info["fundamental"] == "보통":
+                risk_score += 10
 
         if long_trend_weak:
             risk_score += 25
@@ -732,6 +784,18 @@ def risk_scan_portfolio(portfolio: dict, usdkrw: float) -> list[dict]:
     return out
 
 
+def choose_replacements(scanner: list[dict], portfolio: dict) -> list[dict]:
+    current = set(portfolio.keys())
+    out = []
+    for item in scanner:
+        if item["ticker"] in current:
+            continue
+        if item["grade"] not in {"A+ 강력매수", "A 매수"}:
+            continue
+        out.append(item)
+    return out
+
+
 def build_execution_plan(
     usdkrw: float,
     market_state: str,
@@ -740,6 +804,7 @@ def build_execution_plan(
     settings: dict,
     watchlist: list[tuple[str, str]],
     preferred_sectors: list[str],
+    trade_log: pd.DataFrame,
 ):
     sells = []
     buys = []
@@ -772,6 +837,10 @@ def build_execution_plan(
         if not info or info["shares"] <= 0:
             continue
 
+        if bought_recently(ticker, trade_log, days=5):
+            holds.append(f"{ticker} 최근 매수 종목 → 5일간 재매도 금지")
+            continue
+
         sellable = info["shares"]
         if ticker in CORE_MIN_SHARES:
             sellable = max(0, info["shares"] - CORE_MIN_SHARES[ticker])
@@ -785,33 +854,41 @@ def build_execution_plan(
             info["ma365"] is not None and info["price_usd"] < info["ma365"]
         )
 
-        if weak_long_trend and info["fundamental"] == "약함":
-            qty = min(sellable, max(1, math.floor(info["shares"] * 0.20)))
-            reason = "장기 추세 약화 + 실적 약함"
-
-        elif (
-            info["rsi"] is not None
-            and info["rsi"] >= 75
-            and (info["pnl_pct"] or 0) >= 15
-            and info["ma50"] is not None
-            and info["price_usd"] < info["ma50"]
-        ):
-            if is_core:
+        # 코어는 매우 엄격
+        if is_core:
+            if weak_long_trend and info["fundamental"] == "약함":
                 qty = min(sellable, 1)
                 if qty > 0:
-                    reason = "과열 차익 1주 검토"
+                    reason = "코어 장기 붕괴 + 실적 약화"
             else:
+                holds.append(f"{ticker} 코어 종목 → 자동 감축 보수 적용")
+        else:
+            if weak_long_trend and info["fundamental"] == "약함":
+                qty = min(sellable, max(1, math.floor(info["shares"] * 0.20)))
+                reason = "장기 추세 약화 + 실적 약함"
+
+            elif (
+                info["rsi"] is not None
+                and info["rsi"] >= 75
+                and (info["pnl_pct"] or 0) >= 15
+                and info["ma50"] is not None
+                and info["price_usd"] < info["ma50"]
+            ):
                 qty = min(sellable, max(1, math.floor(info["shares"] * 0.20)))
                 reason = "과열 차익"
 
-        elif (not is_core) and info["ma200"] and info["price_usd"] < info["ma200"] and info["qqq60"] is not None and info["qqq60"] <= -8:
-            if info["fundamental"] == "약함":
+            elif (
+                info["ma200"] is not None
+                and info["price_usd"] < info["ma200"]
+                and info["qqq60"] is not None
+                and info["qqq60"] <= -8
+                and info["fundamental"] == "약함"
+            ):
                 qty = min(sellable, 1)
                 reason = "약세 감축"
-            else:
-                holds.append(f"{ticker} 기술 약세지만 실적 {info['fundamental']} → 관망")
 
-        if ticker in weights and weights[ticker] > 0.22 and sellable > 0:
+        # 코어는 비중 과다만으로 매도 금지
+        if (not is_core) and ticker in weights and weights[ticker] > 0.22 and sellable > 0:
             qty = max(qty, 1)
             reason = reason or "비중 과다 조절"
 
@@ -827,24 +904,36 @@ def build_execution_plan(
                 "qty": qty,
                 "amount": round(qty * info["price_krw"]),
                 "reason": reason,
+                "type": portfolio[ticker]["type"],
             })
 
     total_sell = sum(x["amount"] for x in sells)
     scanner = build_scanner(usdkrw, portfolio, watchlist, preferred_sectors)
-
-    if risk_level == "HIGH":
-        scanner = [
-            x for x in scanner
-            if x["grade"] == "A+ 강력매수" and x["sector"] in {"Bond", "Macro", "Healthcare"}
-        ]
-    else:
-        scanner = [x for x in scanner if x["grade"] in {"A+ 강력매수", "A 매수"}]
+    replacements = choose_replacements(scanner, portfolio)
 
     remaining = total_sell
 
-    for item in scanner:
-        ticker = item["ticker"]
-        sector = item["sector"]
+    for sold in sells:
+        sold_type = sold["type"]
+
+        candidates = []
+        for item in replacements:
+            if sold_type == "future":
+                if item["sector"] in FUTURE_SECTORS:
+                    candidates.append(item)
+            elif sold_type == "rotation":
+                if item["sector"] in ROTATION_SECTORS:
+                    candidates.append(item)
+            else:
+                if item["sector"] in preferred_sectors:
+                    candidates.append(item)
+
+        if not candidates:
+            continue
+
+        best = candidates[0]
+        ticker = best["ticker"]
+        sector = best["sector"]
 
         existing_value = current_value_krw(ticker, usdkrw, portfolio)
         if existing_value > total_asset * 0.08:
@@ -859,16 +948,16 @@ def build_execution_plan(
 
         bucket_gap = max(0, bucket_targets[bucket] - bucket_current[bucket])
         stock_gap = max(0, single_cap - existing_value)
-        buy_budget = min(bucket_gap, stock_gap, remaining)
+        buy_budget = min(bucket_gap, stock_gap, sold["amount"], remaining)
 
         if buy_budget <= 0:
             continue
 
-        qty = math.floor(buy_budget / max(item["price_krw"], 1))
+        qty = math.floor(buy_budget / max(best["price_krw"], 1))
         if qty <= 0:
             continue
 
-        amount = qty * item["price_krw"]
+        amount = qty * best["price_krw"]
         if amount < min_trade and remaining >= min_trade:
             continue
 
@@ -876,15 +965,16 @@ def build_execution_plan(
             "ticker": ticker,
             "qty": qty,
             "amount": round(amount),
-            "grade": item["grade"],
+            "grade": best["grade"],
             "sector": sector,
-            "fundamental": item["info"]["fundamental"],
+            "fundamental": best["info"]["fundamental"],
+            "swap_from": sold["ticker"],
         })
 
         remaining -= amount
         bucket_current[bucket] += amount
 
-    return risk_level, risk_alloc, sells, buys, holds[:10], round(total_sell), round(sum(x["amount"] for x in buys)), round(remaining)
+    return risk_level, risk_alloc, sells, buys, holds[:12], round(total_sell), round(sum(x["amount"] for x in buys)), round(remaining)
 
 
 def header_message(usdkrw: float):
@@ -893,7 +983,7 @@ def header_message(usdkrw: float):
     risk_level, risk_alloc = risk_engine(market_state, liquidity_state)
 
     lines = []
-    lines.append("📊 AI 자산운용 시스템 v18")
+    lines.append("📊 AI 자산운용 시스템 v19")
     lines.append("")
     lines.append(f"- 환율: {round(usdkrw):,}원")
     lines.append(f"- 시장: {market_state} | 점수 {market_score}")
@@ -967,9 +1057,10 @@ def execution_message(
     settings: dict,
     watchlist: list[tuple[str, str]],
     preferred_sectors: list[str],
+    trade_log: pd.DataFrame,
 ):
     risk_level, risk_alloc, sells, buys, holds, total_sell, total_buy, remain = build_execution_plan(
-        usdkrw, market_state, liquidity_state, portfolio, settings, watchlist, preferred_sectors
+        usdkrw, market_state, liquidity_state, portfolio, settings, watchlist, preferred_sectors, trade_log
     )
 
     if total_sell == 0 and total_buy < settings["min_trade"]:
@@ -995,7 +1086,9 @@ def execution_message(
     lines.append("[매수/교체 검토]")
     if buys:
         for b in buys:
-            lines.append(f"- {b['ticker']} {b['qty']}주 | 약 {b['amount']:,}원 | {b['grade']} | {b['sector']} | 실적 {b['fundamental']}")
+            lines.append(
+                f"- {b['swap_from']} → {b['ticker']} {b['qty']}주 | 약 {b['amount']:,}원 | {b['grade']} | {b['sector']} | 실적 {b['fundamental']}"
+            )
     else:
         lines.append("- 없음")
 
@@ -1008,7 +1101,7 @@ def execution_message(
             if h not in seen:
                 seen.add(h)
                 uniq.append(h)
-        for h in uniq[:8]:
+        for h in uniq[:10]:
             lines.append(f"- {h}")
     else:
         lines.append("- 없음")
@@ -1020,6 +1113,7 @@ def main():
     portfolio = load_portfolio()
     settings = load_settings()
     watchlist = load_watchlist()
+    trade_log = load_trade_log()
     usdkrw = get_usdkrw()
 
     header, market_state, liquidity_state = header_message(usdkrw)
@@ -1041,6 +1135,7 @@ def main():
         settings,
         watchlist,
         preferred_sectors,
+        trade_log,
     )
     if exe:
         send_telegram(exe)
