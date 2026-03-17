@@ -3,7 +3,9 @@ name: stock-check
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "0 0 * * 1"
+    - cron: "0 0 * * 3"
+    - cron: "0 0 * * 5"
 
 jobs:
   run-script:
@@ -26,4 +28,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
         run: python stock_bot.py
