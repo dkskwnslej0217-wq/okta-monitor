@@ -29,12 +29,22 @@ BUY_PCT_SCORES = {"-10%": 5, "-20%": 10, "-30%": 15, "-40%": 20, "-50%": 25, "-6
 SELL_PCT_SCORES = {"+20%": 5, "+40%": 10, "+60%": 15, "+80%": 20, "+100%": 25}
 
 
+    import pandas as pd
+import requests
+
 def get_sp500():
-    table = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-    symbols = table[0]["Symbol"].tolist()
-    return [s.replace(".", "-") for s in symbols]
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
 
+    html = requests.get(url, headers=headers).text
+    table = pd.read_html(html)
+
+    sp500 = table[0]["Symbol"].tolist()
+
+    return sp500
 def get_nasdaq100():
     table = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
     for df in table:
