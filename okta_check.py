@@ -2,6 +2,7 @@ import os
 import json
 from pathlib import Path
 from io import StringIO
+from datetime import datetime
 
 import requests
 import yfinance as yf
@@ -93,9 +94,7 @@ def send_telegram_message(message):
 
 
 def fetch_tables_with_headers(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers, timeout=20)
     response.raise_for_status()
     return pd.read_html(StringIO(response.text))
@@ -120,6 +119,45 @@ def get_nasdaq100():
             return [str(s).replace(".", "-") for s in symbols]
 
     return []
+
+
+def get_market_status():
+    try:
+        spy = yf.Ticker("SPY").history(period="300d", auto_adjust=False)
+        qqq = yf.Ticker("QQQ").history(period="300d", auto_adjust=False)
+        vix = yf.Ticker("^VIX").history(period="60d", auto_adjust=False)
+
+        spy_close = spy["Close"].dropna()
+        qqq_close = qqq["Close"].dropna()
+        vix_close = vix["Close"].dropna()
+
+        spy_ma200 = safe_float(spy_close.rolling(200).mean().iloc[-1])
+        qqq_ma200 = safe_float(qqq_close.rolling(200).mean().iloc[-1])
+
+        spy_now = safe_float(spy_close.iloc[-1])
+        qqq_now = safe_float(qqq_close.iloc[-1])
+        vix_now = safe_float(vix_close.iloc[-1])
+
+        if None in [spy_ma200, qqq_ma200, spy_now, qqq_now, vix_now]:
+            return "🟡 중립"
+
+        if spy_now > spy_ma200 and qqq_now > qqq_ma200 and vix_now < 20:
+            return "🟢 상승장"
+        elif spy_now < spy_ma200 and qqq_now < qqq_ma200:
+            return "🔴 하락장"
+        else:
+            return "🟡 중립"
+    except Exception:
+        return "🟡 중립"
+
+
+def get_company_name(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+        name = info.get("shortName") or info.get("longName") or ""
+        return name
+    except Exception:
+        return ""
 
 
 def calc_buy_score(line_name, pct_label):
@@ -221,16 +259,14 @@ def assess_action(price_now, ma200_now, ma240_now, ma365_now, close):
 
 
 def main():
-    # 1단계: 텔레그램부터 무조건 테스트
-    send_telegram_message("📡 텔레그램 테스트 메시지 정상 작동")
-    print("텔레그램 테스트 전송 완료")
+    market_status = get_market_status()
 
-    # 2단계: 아래부터 실제 스캔 로직
     sp500 = get_sp500()
     nasdaq100 = get_nasdaq100()
     stocks = sorted(list(set(sp500 + nasdaq100)))
 
     print("=" * 70)
+    print(f"시장 상태: {market_status}")
     print(f"총 감시 종목 수: {len(stocks)}")
     print("=" * 70)
 
@@ -268,6 +304,8 @@ def main():
             if None in [price_now, ma200_now, ma240_now, ma365_now]:
                 continue
 
+            company_name = get_company_name(ticker)
+
             base_lines = {
                 "200일선": ma200_now,
                 "240일선": ma240_now,
@@ -285,6 +323,7 @@ def main():
                         if is_new_signal(state, key, True):
                             buy_signals.append({
                                 "ticker": ticker,
+                                "name": company_name,
                                 "line": line_name,
                                 "pct": pct_label,
                                 "price": round(price_now, 2),
@@ -306,6 +345,7 @@ def main():
                         if is_new_signal(state, key, True):
                             sell_signals.append({
                                 "ticker": ticker,
+                                "name": company_name,
                                 "line": line_name,
                                 "pct": pct_label,
                                 "price": round(price_now, 2),
@@ -332,6 +372,7 @@ def main():
 
                 action_signals.append({
                     "ticker": ticker,
+                    "name": company_name,
                     "action": action_data["action"],
                     "price": round(price_now, 2),
                     "buy_score": action_data["buy_score"],
@@ -345,17 +386,17 @@ def main():
 
     save_state(state)
 
-    buy_signals = sorted(buy_signals, key=lambda x: x["score"], reverse=True)
-    sell_signals = sorted(sell_signals, key=lambda x: x["score"], reverse=True)
-    action_signals = sorted(action_signals, key=lambda x: abs(x["score"]), reverse=True)
+    buy_signals = sorted(buy_signals, key=lambda x: x["score"], reverse=True)[:10]
+    sell_signals = sorted(sell_signals, key=lambda x: x["score"], reverse=True)[:10]
+    action_signals = sorted(action_signals, key=lambda x: abs(x["score"]), reverse=True)[:10]
 
     print("\n" + "=" * 70)
-    print("분할매수 신규 신호")
+    print("TOP 10 분할매수 신규 신호")
     print("=" * 70)
     if buy_signals:
-        for item in buy_signals[:20]:
+        for item in buy_signals:
             print(
-                f"{item['ticker']} | {item['line']} | {item['pct']} | "
+                f"{item['ticker']} ({item['name']}) | {item['line']} | {item['pct']} | "
                 f"현재가: {item['price']} | 목표가: {item['target']} | "
                 f"추천비중: {item['weight']}% | 점수: {item['score']}"
             )
@@ -363,12 +404,12 @@ def main():
         print("없음")
 
     print("\n" + "=" * 70)
-    print("분할매도 신규 신호")
+    print("TOP 10 분할매도 신규 신호")
     print("=" * 70)
     if sell_signals:
-        for item in sell_signals[:20]:
+        for item in sell_signals:
             print(
-                f"{item['ticker']} | {item['line']} | {item['pct']} | "
+                f"{item['ticker']} ({item['name']}) | {item['line']} | {item['pct']} | "
                 f"현재가: {item['price']} | 목표가: {item['target']} | "
                 f"추천매도비중: {item['weight']}% | 점수: {item['score']}"
             )
@@ -376,12 +417,12 @@ def main():
         print("없음")
 
     print("\n" + "=" * 70)
-    print("최종 행동판단 신규 신호")
+    print("TOP 10 최종 행동판단 신규 신호")
     print("=" * 70)
     if action_signals:
-        for item in action_signals[:20]:
+        for item in action_signals:
             print(
-                f"{item['ticker']} | 판단: {item['action']} | 현재가: {item['price']} | "
+                f"{item['ticker']} ({item['name']}) | 판단: {item['action']} | 현재가: {item['price']} | "
                 f"매수점수: {item['buy_score']} | 매도점수: {item['sell_score']} | "
                 f"순점수: {item['score']} | 이유: {item['reason']}"
             )
@@ -399,40 +440,58 @@ def main():
 
     if buy_signals or sell_signals or action_signals:
         lines = []
-        lines.append(f"📊 총 감시 종목 수: {len(stocks)}")
+        lines.append("📊 미국주식 감시 리포트")
+        lines.append("")
+        lines.append(f"시장 상태: {market_status}")
+        lines.append(f"감시 종목 수: {len(stocks)}")
+        lines.append(f"감시 시각: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
         lines.append("")
 
-        lines.append("🟢 [분할매수 신규 신호 - 우선순위 순]")
+        lines.append("🟢 [TOP 10 추가매수 후보]")
         if buy_signals:
-            for item in buy_signals[:15]:
+            for idx, item in enumerate(buy_signals, start=1):
+                name_text = f" ({item['name']})" if item["name"] else ""
                 lines.append(
-                    f"{item['ticker']} | {item['line']} | {item['pct']} | "
-                    f"현재가 {item['price']} | 목표가 {item['target']} | "
-                    f"비중 {item['weight']}% | 점수 {item['score']}"
+                    f"{idx}) {item['ticker']}{name_text}\n"
+                    f"- 기준선: {item['line']}\n"
+                    f"- 위치: {item['pct']}\n"
+                    f"- 현재가: {item['price']}\n"
+                    f"- 목표가: {item['target']}\n"
+                    f"- 추천비중: {item['weight']}%\n"
+                    f"- 우선점수: {item['score']}"
                 )
         else:
             lines.append("없음")
 
         lines.append("")
-        lines.append("🔴 [분할매도 신규 신호 - 우선순위 순]")
+        lines.append("🔴 [TOP 10 분할매도 후보]")
         if sell_signals:
-            for item in sell_signals[:15]:
+            for idx, item in enumerate(sell_signals, start=1):
+                name_text = f" ({item['name']})" if item["name"] else ""
                 lines.append(
-                    f"{item['ticker']} | {item['line']} | {item['pct']} | "
-                    f"현재가 {item['price']} | 목표가 {item['target']} | "
-                    f"매도비중 {item['weight']}% | 점수 {item['score']}"
+                    f"{idx}) {item['ticker']}{name_text}\n"
+                    f"- 기준선: {item['line']}\n"
+                    f"- 위치: {item['pct']}\n"
+                    f"- 현재가: {item['price']}\n"
+                    f"- 목표가: {item['target']}\n"
+                    f"- 추천매도비중: {item['weight']}%\n"
+                    f"- 우선점수: {item['score']}"
                 )
         else:
             lines.append("없음")
 
         lines.append("")
-        lines.append("🧠 [최종 행동판단 신규 신호]")
+        lines.append("🧠 [TOP 10 최종 행동판단]")
         if action_signals:
-            for item in action_signals[:15]:
+            for idx, item in enumerate(action_signals, start=1):
+                name_text = f" ({item['name']})" if item["name"] else ""
                 lines.append(
-                    f"{item['ticker']} | {item['action']} | 현재가 {item['price']} | "
-                    f"매수점수 {item['buy_score']} | 매도점수 {item['sell_score']} | "
-                    f"이유: {item['reason']}"
+                    f"{idx}) {item['ticker']}{name_text}\n"
+                    f"- 판단: {item['action']}\n"
+                    f"- 현재가: {item['price']}\n"
+                    f"- 매수점수: {item['buy_score']}\n"
+                    f"- 매도점수: {item['sell_score']}\n"
+                    f"- 이유: {item['reason']}"
                 )
         else:
             lines.append("없음")
