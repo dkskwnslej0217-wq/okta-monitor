@@ -1,6 +1,7 @@
 import os
 import json
 from pathlib import Path
+from io import StringIO
 
 import requests
 import yfinance as yf
@@ -10,7 +11,6 @@ STATE_FILE = "signal_state.json"
 
 BUY_LEVELS = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4]   # -10, -20, -30, -40, -50, -60
 SELL_LEVELS = [1.2, 1.4, 1.6, 1.8, 2.0]       # +20, +40, +60, +80, +100
-
 
 BUY_WEIGHTS = {
     "200일선": {"-10%": 3, "-20%": 4, "-30%": 5, "-40%": 6, "-50%": 7, "-60%": 8},
@@ -27,33 +27,6 @@ SELL_WEIGHTS = {
 LINE_SCORES = {"200일선": 10, "240일선": 20, "365일선": 30}
 BUY_PCT_SCORES = {"-10%": 5, "-20%": 10, "-30%": 15, "-40%": 20, "-50%": 25, "-60%": 30}
 SELL_PCT_SCORES = {"+20%": 5, "+40%": 10, "+60%": 15, "+80%": 20, "+100%": 25}
-
-
-import pandas as pd
-import requests
-
-def get_sp500():
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    html = requests.get(url, headers=headers).text
-    table = pd.read_html(html)
-
-    sp500 = table[0]["Symbol"].tolist()
-
-    return sp500
-def get_nasdaq100():
-    table = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-    for df in table:
-        cols = [str(c).strip().lower() for c in df.columns]
-        if "ticker" in cols:
-            ticker_col = df.columns[cols.index("ticker")]
-            symbols = df[ticker_col].tolist()
-            return [str(s).replace(".", "-") for s in symbols]
-    return []
 
 
 def load_state():
@@ -100,6 +73,10 @@ def send_telegram_message(message):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
+    print("TOKEN 존재:", bool(token))
+    print("CHAT_ID 존재:", bool(chat_id))
+    print("CHAT_ID 값:", chat_id)
+
     if not token or not chat_id:
         print("텔레그램 환경변수 누락: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID")
         return
@@ -115,6 +92,36 @@ def send_telegram_message(message):
     print(r.text)
 
 
+def fetch_tables_with_headers(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+    response = requests.get(url, headers=headers, timeout=20)
+    response.raise_for_status()
+    return pd.read_html(StringIO(response.text))
+
+
+def get_sp500():
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    tables = fetch_tables_with_headers(url)
+    symbols = tables[0]["Symbol"].tolist()
+    return [str(s).replace(".", "-") for s in symbols]
+
+
+def get_nasdaq100():
+    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+    tables = fetch_tables_with_headers(url)
+
+    for df in tables:
+        cols = [str(c).strip().lower() for c in df.columns]
+        if "ticker" in cols:
+            ticker_col = df.columns[cols.index("ticker")]
+            symbols = df[ticker_col].tolist()
+            return [str(s).replace(".", "-") for s in symbols]
+
+    return []
+
+
 def calc_buy_score(line_name, pct_label):
     return LINE_SCORES[line_name] + BUY_PCT_SCORES[pct_label]
 
@@ -124,10 +131,6 @@ def calc_sell_score(line_name, pct_label):
 
 
 def assess_action(price_now, ma200_now, ma240_now, ma365_now, close):
-    """
-    가격 + 추세 기반 최종판단
-    return: dict(action, score, reason)
-    """
     sell_score = 0
     buy_score = 0
     reasons = []
@@ -153,27 +156,25 @@ def assess_action(price_now, ma200_now, ma240_now, ma365_now, close):
             ma365_slope_down = True
 
     low_60 = safe_float(close.tail(60).min())
-    high_60 = safe_float(close.tail(60).max())
     ret_20 = None
+
     if len(close) >= 21:
         prev_20 = safe_float(close.iloc[-21])
         if prev_20 and prev_20 != 0:
             ret_20 = (price_now / prev_20 - 1) * 100
 
-    # 위치 판단
     if price_now < ma200_now:
         sell_score += 1
         reasons.append("200일선 아래")
     if price_now < ma240_now:
         sell_score += 2
-        reasons.append("240일선 아래")
         buy_score += 2
+        reasons.append("240일선 아래")
     if price_now < ma365_now:
         sell_score += 3
-        reasons.append("365일선 아래")
         buy_score += 3
+        reasons.append("365일선 아래")
 
-    # 추세 판단
     if ma200_slope_down:
         sell_score += 1
         reasons.append("200일선 하락기울기")
@@ -184,7 +185,6 @@ def assess_action(price_now, ma200_now, ma240_now, ma365_now, close):
         sell_score += 1
         reasons.append("365일선 하락기울기")
 
-    # 최근 저점/반등 판단
     if low_60 is not None and low_60 > 0:
         dist_from_low = (price_now / low_60 - 1) * 100
         if dist_from_low <= 3:
@@ -194,7 +194,6 @@ def assess_action(price_now, ma200_now, ma240_now, ma365_now, close):
             buy_score += 1
             reasons.append("저점권 근처")
 
-    # 단기 과열 아님 → 분할매수 우호
     if ret_20 is not None:
         if ret_20 < -10:
             buy_score += 1
@@ -203,7 +202,6 @@ def assess_action(price_now, ma200_now, ma240_now, ma365_now, close):
             sell_score += 1
             reasons.append("20일 단기 과열")
 
-    # 최종판단
     if sell_score >= 7:
         action = "매도"
     elif buy_score >= 4 and sell_score <= 5:
@@ -223,6 +221,11 @@ def assess_action(price_now, ma200_now, ma240_now, ma365_now, close):
 
 
 def main():
+    # 1단계: 텔레그램부터 무조건 테스트
+    send_telegram_message("📡 텔레그램 테스트 메시지 정상 작동")
+    print("텔레그램 테스트 전송 완료")
+
+    # 2단계: 아래부터 실제 스캔 로직
     sp500 = get_sp500()
     nasdaq100 = get_nasdaq100()
     stocks = sorted(list(set(sp500 + nasdaq100)))
@@ -271,7 +274,6 @@ def main():
                 "365일선": ma365_now
             }
 
-            # 분할매수
             for line_name, base_value in base_lines.items():
                 for lv in BUY_LEVELS:
                     pct = int((1 - lv) * 100)
@@ -293,7 +295,6 @@ def main():
                     else:
                         reset_signal(state, key)
 
-            # 분할매도
             for line_name, base_value in base_lines.items():
                 for lv in SELL_LEVELS:
                     pct = int((lv - 1) * 100)
@@ -315,7 +316,6 @@ def main():
                     else:
                         reset_signal(state, key)
 
-            # 최종 행동 판단
             action_data = assess_action(
                 price_now=price_now,
                 ma200_now=ma200_now,
@@ -326,7 +326,6 @@ def main():
 
             action_key = make_key(ticker, "행동판단", action_data["action"])
             if is_new_signal(state, action_key, True):
-                # 다른 액션 상태는 꺼준다
                 for other in ["추가매수", "관망", "매도"]:
                     if other != action_data["action"]:
                         reset_signal(state, make_key(ticker, "행동판단", other))
@@ -354,7 +353,7 @@ def main():
     print("분할매수 신규 신호")
     print("=" * 70)
     if buy_signals:
-        for item in buy_signals:
+        for item in buy_signals[:20]:
             print(
                 f"{item['ticker']} | {item['line']} | {item['pct']} | "
                 f"현재가: {item['price']} | 목표가: {item['target']} | "
@@ -367,7 +366,7 @@ def main():
     print("분할매도 신규 신호")
     print("=" * 70)
     if sell_signals:
-        for item in sell_signals:
+        for item in sell_signals[:20]:
             print(
                 f"{item['ticker']} | {item['line']} | {item['pct']} | "
                 f"현재가: {item['price']} | 목표가: {item['target']} | "
@@ -380,7 +379,7 @@ def main():
     print("최종 행동판단 신규 신호")
     print("=" * 70)
     if action_signals:
-        for item in action_signals:
+        for item in action_signals[:20]:
             print(
                 f"{item['ticker']} | 판단: {item['action']} | 현재가: {item['price']} | "
                 f"매수점수: {item['buy_score']} | 매도점수: {item['sell_score']} | "
@@ -398,7 +397,6 @@ def main():
     else:
         print("없음")
 
-    # 텔레그램 발송
     if buy_signals or sell_signals or action_signals:
         lines = []
         lines.append(f"📊 총 감시 종목 수: {len(stocks)}")
@@ -444,7 +442,6 @@ def main():
     else:
         print("신규 신호 없음 - 텔레그램 발송 안 함")
 
+
 if __name__ == "__main__":
     main()
-    send_telegram_message("📡 텔레그램 테스트 메시지 정상 작동")
-
