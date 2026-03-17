@@ -299,25 +299,43 @@ def market_engine() -> tuple[str, int, list[str]]:
     score = 0
     notes = []
 
-    spy, _ = get_history("SPY", "1y")
-    qqq, _ = get_history("QQQ", "1y")
+    spy, _ = get_history("SPY", "2y")
+    qqq, _ = get_history("QQQ", "2y")
     vix, _ = get_history("^VIX", "3mo")
 
-    if len(spy) >= 200:
-        if float(spy.iloc[-1]) > float(spy.rolling(200).mean().iloc[-1]):
+    if len(spy) >= 240:
+        spy_ma200 = float(spy.rolling(200).mean().iloc[-1])
+        spy_ma240 = float(spy.rolling(240).mean().iloc[-1])
+        if float(spy.iloc[-1]) > spy_ma200:
             score += 2
             notes.append("SPY > 200MA")
         else:
             score -= 2
             notes.append("SPY < 200MA")
 
-    if len(qqq) >= 200:
-        if float(qqq.iloc[-1]) > float(qqq.rolling(200).mean().iloc[-1]):
+        if float(spy.iloc[-1]) > spy_ma240:
+            score += 1
+            notes.append("SPY > 240MA")
+        else:
+            score -= 1
+            notes.append("SPY < 240MA")
+
+    if len(qqq) >= 240:
+        qqq_ma200 = float(qqq.rolling(200).mean().iloc[-1])
+        qqq_ma240 = float(qqq.rolling(240).mean().iloc[-1])
+        if float(qqq.iloc[-1]) > qqq_ma200:
             score += 2
             notes.append("QQQ > 200MA")
         else:
             score -= 2
             notes.append("QQQ < 200MA")
+
+        if float(qqq.iloc[-1]) > qqq_ma240:
+            score += 1
+            notes.append("QQQ > 240MA")
+        else:
+            score -= 1
+            notes.append("QQQ < 240MA")
 
     if len(vix) > 0:
         vv = float(vix.iloc[-1])
@@ -330,7 +348,7 @@ def market_engine() -> tuple[str, int, list[str]]:
         else:
             notes.append("VIX 중간")
 
-    if score >= 3:
+    if score >= 4:
         return "🟢 Risk ON", score, notes
     if score >= 1:
         return "🟡 Neutral", score, notes
@@ -416,13 +434,15 @@ def sector_rotation_engine(market_state: str) -> list[str]:
 
 
 def snapshot(ticker: str, usdkrw: float, portfolio: dict) -> dict | None:
-    close, _ = get_history(ticker, "1y")
+    close, _ = get_history(ticker, "2y")
     if len(close) == 0:
         return None
 
     price = float(close.iloc[-1])
     ma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else None
     ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+    ma240 = float(close.rolling(240).mean().iloc[-1]) if len(close) >= 240 else None
+    ma365 = float(close.rolling(365).mean().iloc[-1]) if len(close) >= 365 else None
     rr = rsi(close)
 
     qqq = compare_vs_benchmark(ticker, "QQQ")
@@ -442,6 +462,8 @@ def snapshot(ticker: str, usdkrw: float, portfolio: dict) -> dict | None:
         "price_krw": round(price * usdkrw),
         "ma50": ma50,
         "ma200": ma200,
+        "ma240": ma240,
+        "ma365": ma365,
         "rsi": rr,
         "shares": shares,
         "avg": avg,
@@ -456,11 +478,11 @@ def snapshot(ticker: str, usdkrw: float, portfolio: dict) -> dict | None:
 
 
 def grade_from_score(score: int) -> str:
-    if score >= 60:
+    if score >= 70:
         return "A+ 강력매수"
-    if score >= 45:
+    if score >= 50:
         return "A 매수"
-    if score >= 25:
+    if score >= 30:
         return "B 관망"
     return "C 제외"
 
@@ -473,31 +495,48 @@ def rate_candidate(ticker: str, sector: str, usdkrw: float, portfolio: dict, pre
     score = 0
     reasons = []
 
-    if info["ma200"] and info["price_usd"] < info["ma200"]:
+    if info["ma365"] and info["price_usd"] > info["ma365"]:
         score += 15
-        reasons.append("200일선 아래")
-    else:
-        score += 5
+        reasons.append("365일선 위")
+    elif info["ma365"]:
+        score -= 10
+        reasons.append("365일선 아래")
+
+    if info["ma240"] and info["price_usd"] > info["ma240"]:
+        score += 10
+        reasons.append("240일선 위")
+    elif info["ma240"]:
+        score -= 8
+        reasons.append("240일선 아래")
+
+    if info["ma200"] and info["price_usd"] > info["ma200"]:
+        score += 8
         reasons.append("200일선 위")
+    elif info["ma200"]:
+        score += 10
+        reasons.append("200일선 아래 눌림")
 
     if info["ma50"] and info["price_usd"] < info["ma50"]:
-        score += 10
+        score += 8
         reasons.append("50일선 아래 눌림")
 
     if info["rsi"] is not None:
         if info["rsi"] < 35:
-            score += 20
+            score += 15
             reasons.append("RSI 과매도")
         elif info["rsi"] < 45:
-            score += 10
+            score += 8
             reasons.append("RSI 중립하단")
+        elif info["rsi"] > 72:
+            score -= 8
+            reasons.append("RSI 과열")
 
     if info["qqq20"] is not None:
         if info["qqq20"] >= 2:
-            score += 10
+            score += 8
             reasons.append("QQQ 대비 강함")
         elif info["qqq20"] <= -8:
-            score -= 10
+            score -= 8
             reasons.append("QQQ 대비 약함")
 
     if info["spy20"] is not None and info["spy20"] >= 2:
@@ -548,7 +587,7 @@ def build_scanner(usdkrw: float, portfolio: dict, watchlist: list[tuple[str, str
         if src_hot and dst_dip:
             for r in recs:
                 if r["ticker"] == dst:
-                    r["score"] += 15
+                    r["score"] += 12
                     r["grade"] = grade_from_score(r["score"])
                     r["reason"] = f"{src} 과열 → {dst} 눌림"
 
@@ -640,27 +679,48 @@ def build_execution_plan(
         qty = 0
         reason = None
 
-        if info["pnl_pct"] is not None and info["pnl_pct"] <= -20:
-            if info["fundamental"] == "약함":
-                qty = min(sellable, max(1, math.floor(info["shares"] * 0.20)))
-                reason = "손실 정리"
-            else:
-                holds.append(f"{ticker} 손실이지만 실적 {info['fundamental']} → 관망")
+        # 코어 보호
+        is_core = portfolio[ticker]["type"] == "core"
 
-        elif info["rsi"] is not None and info["rsi"] >= 72 and (info["pnl_pct"] or 0) > 5:
+        # 1) 실적 약하고 240/365 둘 다 아래면 감축
+        weak_long_trend = (
+            info["ma240"] is not None and info["price_usd"] < info["ma240"] and
+            info["ma365"] is not None and info["price_usd"] < info["ma365"]
+        )
+
+        if weak_long_trend and info["fundamental"] == "약함":
             qty = min(sellable, max(1, math.floor(info["shares"] * 0.20)))
-            reason = "과열 차익"
+            reason = "장기 추세 약화 + 실적 약함"
 
-        elif info["ma200"] and info["price_usd"] < info["ma200"] and info["qqq60"] is not None and info["qqq60"] <= -8:
+        # 2) 과열 차익: 코어는 1주만, 비코어는 20%
+        elif info["rsi"] is not None and info["rsi"] >= 74 and (info["pnl_pct"] or 0) >= 8:
+            if is_core:
+                qty = min(sellable, 1)
+                if qty > 0:
+                    reason = "과열 차익 1주 검토"
+            else:
+                qty = min(sellable, max(1, math.floor(info["shares"] * 0.20)))
+                reason = "과열 차익"
+
+        # 3) 비코어만 약세 감축
+        elif (not is_core) and info["ma200"] and info["price_usd"] < info["ma200"] and info["qqq60"] is not None and info["qqq60"] <= -8:
             if info["fundamental"] == "약함":
                 qty = min(sellable, 1)
                 reason = "약세 감축"
             else:
                 holds.append(f"{ticker} 기술 약세지만 실적 {info['fundamental']} → 관망")
 
-        if ticker in weights and weights[ticker] > 0.20 and sellable > 0:
+        # 4) 비중 과다 조절
+        if ticker in weights and weights[ticker] > 0.22 and sellable > 0:
             qty = max(qty, 1)
             reason = reason or "비중 과다 조절"
+
+        # 5) 손실 문구는 보수적으로
+        if qty == 0:
+            if info["pnl_pct"] is not None and info["pnl_pct"] <= -20 and info["fundamental"] != "약함":
+                holds.append(f"{ticker} 손실 구간이지만 실적 {info['fundamental']} → 관망")
+            elif weak_long_trend and info["fundamental"] != "약함":
+                holds.append(f"{ticker} 장기 추세 약화지만 실적 {info['fundamental']} → 관망")
 
         if qty > 0 and reason:
             sells.append({
@@ -687,6 +747,11 @@ def build_execution_plan(
         ticker = item["ticker"]
         sector = item["sector"]
 
+        # 이미 충분히 들고 있으면 패스
+        existing_value = current_value_krw(ticker, usdkrw, portfolio)
+        if existing_value > total_asset * 0.08:
+            continue
+
         if sector in FUTURE_SECTORS:
             bucket = "future"
             single_cap = total_asset * 0.03
@@ -695,8 +760,7 @@ def build_execution_plan(
             single_cap = total_asset * 0.08
 
         bucket_gap = max(0, bucket_targets[bucket] - bucket_current[bucket])
-        current_val = current_value_krw(ticker, usdkrw, portfolio)
-        stock_gap = max(0, single_cap - current_val)
+        stock_gap = max(0, single_cap - existing_value)
         buy_budget = min(bucket_gap, stock_gap, remaining)
 
         if buy_budget <= 0:
@@ -731,7 +795,7 @@ def header_message(usdkrw: float):
     risk_level, risk_alloc = risk_engine(market_state, liquidity_state)
 
     lines = []
-    lines.append("📊 AI 자산운용 시스템 v15")
+    lines.append("📊 AI 자산운용 시스템 v16")
     lines.append("")
     lines.append(f"- 환율: {round(usdkrw):,}원")
     lines.append(f"- 시장: {market_state} | 점수 {market_score}")
@@ -740,7 +804,7 @@ def header_message(usdkrw: float):
     lines.append(f"- 권장 비중: 주식 {int(risk_alloc['stock']*100)}% / 채권 {int(risk_alloc['bond']*100)}% / 현금 {int(risk_alloc['cash']*100)}%")
     lines.append("")
     lines.append("핵심")
-    for x in (market_notes[:2] + liquidity_notes[:3]):
+    for x in (market_notes[:4] + liquidity_notes[:3]):
         lines.append(f"- {x}")
 
     return "\n".join(lines), market_state, liquidity_state
@@ -804,7 +868,7 @@ def execution_message(
     lines.append(f"- 실행 후 예상 잔여현금: {remain:,}원")
     lines.append("")
 
-    lines.append("[매도]")
+    lines.append("[매도/감축 검토]")
     if sells:
         for s in sells:
             lines.append(f"- {s['ticker']} {s['qty']}주 | 약 {s['amount']:,}원 | {s['reason']}")
@@ -812,7 +876,7 @@ def execution_message(
         lines.append("- 없음")
 
     lines.append("")
-    lines.append("[매수]")
+    lines.append("[매수 검토]")
     if buys:
         for b in buys:
             lines.append(f"- {b['ticker']} {b['qty']}주 | 약 {b['amount']:,}원 | {b['grade']} | {b['sector']} | 실적 {b['fundamental']}")
@@ -820,7 +884,7 @@ def execution_message(
         lines.append("- 없음")
 
     lines.append("")
-    lines.append("[관망/보류]")
+    lines.append("[관망/유지]")
     if holds:
         for h in holds[:8]:
             lines.append(f"- {h}")
