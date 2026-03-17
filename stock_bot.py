@@ -58,7 +58,6 @@ future_targets = {
     "IONQ": {"weight": 0.02},
 }
 
-# 반대 성향 페어
 pair_map = {
     "PANW": "V",
     "CRWD": "KMI",
@@ -69,8 +68,16 @@ pair_map = {
     "MSFT": "AMT",
 }
 
-WATCHLIST = sorted(set(list(core_targets.keys()) + list(rotation_targets.keys()) + list(future_targets.keys()) + list(portfolio.keys())))
+WATCHLIST = sorted(set(
+    list(core_targets.keys()) +
+    list(rotation_targets.keys()) +
+    list(future_targets.keys()) +
+    list(portfolio.keys())
+))
 
+# -----------------------------
+# telegram
+# -----------------------------
 def send_telegram(msg: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print(msg)
@@ -78,6 +85,9 @@ def send_telegram(msg: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=20)
 
+# -----------------------------
+# data utils
+# -----------------------------
 def get_history(ticker: str, period="1y"):
     df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=False)
     if isinstance(df, pd.DataFrame) and not df.empty:
@@ -109,6 +119,20 @@ def get_usdkrw():
         pass
     return 1350.0
 
+def compare_vs_benchmark(ticker: str, benchmark: str, period="6mo"):
+    try:
+        a, _ = get_history(ticker, period=period)
+        b, _ = get_history(benchmark, period=period)
+        if len(a) < 61 or len(b) < 61:
+            return {"20d": None, "60d": None}
+        a20, b20 = calc_return(a, 20), calc_return(b, 20)
+        a60, b60 = calc_return(a, 60), calc_return(b, 60)
+        d20 = None if a20 is None or b20 is None else round(a20 - b20, 1)
+        d60 = None if a60 is None or b60 is None else round(a60 - b60, 1)
+        return {"20d": d20, "60d": d60}
+    except Exception:
+        return {"20d": None, "60d": None}
+
 def fred_series(series_id: str):
     if not FRED_API_KEY:
         return None
@@ -131,33 +155,100 @@ def fred_series(series_id: str):
     except Exception:
         return None
 
-def compare_vs_benchmark(ticker: str, benchmark: str, period="6mo"):
+# -----------------------------
+# fundamentals
+# -----------------------------
+def fundamental_status(ticker: str):
+    """
+    양호 / 보통 / 약함
+    너무 느려지지 않게 간단한 핵심 지표만 사용
+    """
     try:
-        a, _ = get_history(ticker, period=period)
-        b, _ = get_history(benchmark, period=period)
-        if len(a) < 61 or len(b) < 61:
-            return {"20d": None, "60d": None}
-        a20, b20 = calc_return(a, 20), calc_return(b, 20)
-        a60, b60 = calc_return(a, 60), calc_return(b, 60)
-        d20 = None if a20 is None or b20 is None else round(a20 - b20, 1)
-        d60 = None if a60 is None or b60 is None else round(a60 - b60, 1)
-        return {"20d": d20, "60d": d60}
-    except Exception:
-        return {"20d": None, "60d": None}
+        info = yf.Ticker(ticker).info
 
+        revenue_growth = info.get("revenueGrowth")
+        earnings_growth = info.get("earningsQuarterlyGrowth")
+        gross_margin = info.get("grossMargins")
+        operating_margin = info.get("operatingMargins")
+        forward_pe = info.get("forwardPE")
+        trailing_pe = info.get("trailingPE")
+
+        score = 0
+        notes = []
+
+        if revenue_growth is not None:
+            if revenue_growth > 0.10:
+                score += 2
+                notes.append("매출성장 양호")
+            elif revenue_growth > 0:
+                score += 1
+                notes.append("매출성장 보통")
+            else:
+                score -= 2
+                notes.append("매출성장 둔화")
+
+        if earnings_growth is not None:
+            if earnings_growth > 0:
+                score += 2
+                notes.append("이익성장 양호")
+            else:
+                score -= 2
+                notes.append("이익성장 약함")
+
+        if gross_margin is not None:
+            if gross_margin > 0.50:
+                score += 1
+                notes.append("총마진 우수")
+            elif gross_margin < 0.20:
+                score -= 1
+                notes.append("총마진 낮음")
+
+        if operating_margin is not None:
+            if operating_margin > 0.15:
+                score += 1
+                notes.append("영업마진 양호")
+            elif operating_margin < 0:
+                score -= 2
+                notes.append("영업적자")
+
+        # 밸류 너무 비싸면 과열 참고만
+        pe = forward_pe if forward_pe is not None else trailing_pe
+        if pe is not None and pe > 80:
+            score -= 1
+            notes.append("밸류 부담")
+
+        if score >= 3:
+            return "양호", ", ".join(notes[:4])
+        elif score >= 0:
+            return "보통", ", ".join(notes[:4])
+        else:
+            return "약함", ", ".join(notes[:4])
+
+    except Exception:
+        return "보통", "실적 데이터 제한"
+
+# -----------------------------
+# snapshot
+# -----------------------------
 def snapshot(ticker: str, usdkrw: float):
     close, vol = get_history(ticker, period="1y")
     if len(close) == 0:
         return None
+
     price = float(close.iloc[-1])
     ma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else None
     ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
     rr = float(rsi(close).iloc[-1]) if len(close) >= 20 else None
+
     qqq = compare_vs_benchmark(ticker, "QQQ")
     spy = compare_vs_benchmark(ticker, "SPY")
+
     shares = portfolio.get(ticker, {}).get("shares", 0)
     avg = portfolio.get(ticker, {}).get("avg")
-    pnl_pct = None if not avg else round((price / avg - 1) * 100, 1)
+    pnl_pct = None if avg is None else round((price / avg - 1) * 100, 1)
+
+    f_status, f_reason = fundamental_status(ticker)
+
     return {
         "ticker": ticker,
         "price": round(price, 2),
@@ -172,8 +263,13 @@ def snapshot(ticker: str, usdkrw: float):
         "qqq60": qqq["60d"],
         "spy20": spy["20d"],
         "spy60": spy["60d"],
+        "fundamental": f_status,
+        "fundamental_reason": f_reason,
     }
 
+# -----------------------------
+# market / liquidity
+# -----------------------------
 def market_engine():
     score = 0
     notes = []
@@ -273,6 +369,9 @@ def liquidity_engine():
         return "🟡 유동성 중립", round(score, 1), notes
     return "🔴 유동성 부담", round(score, 1), notes
 
+# -----------------------------
+# recommendations
+# -----------------------------
 def tier_from_score(score: int):
     if score >= 50:
         return "A급"
@@ -314,30 +413,37 @@ def rate_rotation_candidate(ticker: str, usdkrw: float):
         elif info["qqq20"] <= -8:
             score -= 10
 
-    if info["spy20"] is not None:
-        if info["spy20"] >= 2:
-            score += 5
-            reasons.append("SPY 대비 강함")
+    if info["spy20"] is not None and info["spy20"] >= 2:
+        score += 5
+        reasons.append("SPY 대비 강함")
+
+    # 실적 반영
+    if info["fundamental"] == "양호":
+        score += 15
+        reasons.append("실적 양호")
+    elif info["fundamental"] == "보통":
+        score += 5
+        reasons.append("실적 보통")
+    else:
+        score -= 15
+        reasons.append("실적 약함")
 
     return {
         "ticker": ticker,
         "score": score,
         "tier": tier_from_score(score),
-        "reason": ", ".join(reasons[:4]),
+        "reason": ", ".join(reasons[:5]),
         "price_krw": info["price_krw"],
         "info": info,
     }
 
 def build_recommendations(usdkrw: float):
     recs = []
-
-    # 전략상 중요 후보 우선
     for ticker in ["GLD", "TLT", "V", "NVDA", "MSFT", "AMT", "EQIX", "MCK", "CEG", "LUNR", "RKLB", "QBTS"]:
         r = rate_rotation_candidate(ticker, usdkrw)
         if r:
             recs.append(r)
 
-    # 반대팀 로테이션 보정
     for src, dst in pair_map.items():
         src_info = snapshot(src, usdkrw)
         dst_info = snapshot(dst, usdkrw)
@@ -354,7 +460,6 @@ def build_recommendations(usdkrw: float):
                     r["tier"] = tier_from_score(r["score"])
                     r["reason"] = f"{src} 과열 → {dst} 눌림"
 
-    # 미래성장은 최대 2개만
     recs = sorted(recs, key=lambda x: x["score"], reverse=True)
 
     seen = set()
@@ -374,6 +479,9 @@ def build_recommendations(usdkrw: float):
 
     return final[:8]
 
+# -----------------------------
+# execution
+# -----------------------------
 def current_value_krw(ticker: str, usdkrw: float):
     info = snapshot(ticker, usdkrw)
     if not info:
@@ -394,7 +502,6 @@ def build_execution_plan(usdkrw: float, market_state: str, liq_state: str):
     buys = []
     holds = []
 
-    # 1) 매도 후보
     for ticker in portfolio.keys():
         info = snapshot(ticker, usdkrw)
         if not info or info["shares"] <= 0:
@@ -416,15 +523,25 @@ def build_execution_plan(usdkrw: float, market_state: str, liq_state: str):
         qty = 0
         reason = None
 
+        # 실적 약하면 손실/약세 정리
         if info["pnl_pct"] is not None and info["pnl_pct"] <= -20:
-            qty = min(sellable, max(1, math.floor(info["shares"] * 0.20)))
-            reason = "손실 정리"
+            if info["fundamental"] == "약함":
+                qty = min(sellable, max(1, math.floor(info["shares"] * 0.20)))
+                reason = "손실 정리"
+            else:
+                holds.append(f"{ticker} 손실이지만 실적 괜찮아 관망")
+
         elif info["rsi"] is not None and info["rsi"] >= 72 and (info["pnl_pct"] or 0) > 5:
             qty = min(sellable, max(1, math.floor(info["shares"] * 0.20)))
             reason = "과열 차익"
+
         elif info["ma200"] and info["price"] < info["ma200"] and info["qqq60"] is not None and info["qqq60"] <= -8:
-            qty = min(sellable, 1)
-            reason = "약세 감축"
+            # 기술 약세라도 실적이 괜찮으면 관망
+            if info["fundamental"] == "약함":
+                qty = min(sellable, 1)
+                reason = "약세 감축"
+            else:
+                holds.append(f"{ticker} 기술 약세지만 실적 {info['fundamental']} → 관망")
 
         if qty > 0 and reason:
             amount = qty * info["price_krw"]
@@ -437,10 +554,7 @@ def build_execution_plan(usdkrw: float, market_state: str, liq_state: str):
 
     total_sell = sum(x["amount"] for x in sells)
 
-    # 2) 매수 후보
     recs = build_recommendations(usdkrw)
-
-    # 유동성 나쁘면 A급만
     if "부담" in liq_state or "Risk OFF" in market_state:
         recs = [x for x in recs if x["tier"] == "A급"]
     else:
@@ -455,7 +569,6 @@ def build_execution_plan(usdkrw: float, market_state: str, liq_state: str):
         target_val = target_value_krw(ticker)
         gap = max(0, target_val - current_val)
 
-        # 미래성장은 너무 크게 안 삼
         if ticker in future_targets:
             gap = min(gap, round(TOTAL_KRW * 0.03))
 
@@ -474,16 +587,20 @@ def build_execution_plan(usdkrw: float, market_state: str, liq_state: str):
             "qty": qty,
             "amount": round(amount),
             "tier": r["tier"],
+            "fundamental": r["info"]["fundamental"],
         })
 
-    return sells, buys, holds[:8], round(total_sell), round(sum(x["amount"] for x in buys)), round(remaining)
+    return sells, buys, holds[:10], round(total_sell), round(sum(x["amount"] for x in buys)), round(remaining)
 
+# -----------------------------
+# messages
+# -----------------------------
 def header_message(usdkrw: float):
     market_state, market_score, market_notes = market_engine()
     liq_state, liq_score, liq_notes = liquidity_engine()
 
     lines = []
-    lines.append("📊 AI 자산운용 시스템 v2")
+    lines.append("📊 AI 자산운용 시스템 v3")
     lines.append("")
     lines.append(f"- 환율: {usdkrw:,.0f}원")
     lines.append(f"- 시장: {market_state} | 점수 {market_score}")
@@ -503,28 +620,29 @@ def portfolio_state_message(usdkrw: float):
     for ticker in core_targets.keys():
         info = snapshot(ticker, usdkrw)
         if info and info["shares"] > 0:
-            lines.append(f"- {ticker} {info['shares']}주 | 최소유지 {core_targets[ticker]['min_shares']}주")
+            lines.append(
+                f"- {ticker} {info['shares']}주 | 최소유지 {core_targets[ticker]['min_shares']}주 | 실적 {info['fundamental']}"
+            )
 
     lines.append("")
     lines.append("로테이션 관심")
     for ticker in list(rotation_targets.keys())[:6]:
         info = snapshot(ticker, usdkrw)
         if info:
-            lines.append(f"- {ticker} | 약 {info['price_krw']:,}원")
+            lines.append(f"- {ticker} | 약 {info['price_krw']:,}원 | 실적 {info['fundamental']}")
 
     lines.append("")
     lines.append("미래성장 레이더")
     for ticker in future_targets.keys():
         info = snapshot(ticker, usdkrw)
         if info:
-            lines.append(f"- {ticker} | 약 {info['price_krw']:,}원")
+            lines.append(f"- {ticker} | 약 {info['price_krw']:,}원 | 실적 {info['fundamental']}")
 
     return "\n".join(lines)
 
 def execution_message(usdkrw: float, market_state: str, liq_state: str):
     sells, buys, holds, total_sell, total_buy, remain = build_execution_plan(usdkrw, market_state, liq_state)
 
-    # 실행이 너무 작으면 실행표 안 보냄
     if total_sell < 200_000 and total_buy < 200_000:
         return None
 
@@ -547,14 +665,14 @@ def execution_message(usdkrw: float, market_state: str, liq_state: str):
     lines.append("[매수]")
     if buys:
         for b in buys:
-            lines.append(f"- {b['ticker']} {b['qty']}주 | 약 {b['amount']:,}원 | {b['tier']}")
+            lines.append(f"- {b['ticker']} {b['qty']}주 | 약 {b['amount']:,}원 | {b['tier']} | 실적 {b['fundamental']}")
     else:
         lines.append("- 없음")
 
     lines.append("")
-    lines.append("[보류]")
+    lines.append("[관망/보류]")
     if holds:
-        for h in holds[:6]:
+        for h in holds[:8]:
             lines.append(f"- {h}")
     else:
         lines.append("- 없음")
