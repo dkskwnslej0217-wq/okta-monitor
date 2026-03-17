@@ -9,9 +9,6 @@ jobs:
   run-script:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,18 +19,10 @@ jobs:
           python-version: "3.10"
 
       - name: Install packages
-        run: pip install yfinance pandas requests lxml html5lib beautifulsoup4
+        run: pip install yfinance pandas numpy requests
 
       - name: Run script
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python okta_check.py
-
-      - name: Commit state file
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add signal_state.json || true
-          git diff --cached --quiet || git commit -m "Update signal state"
-          git push
+        run: python stock_bot.py
