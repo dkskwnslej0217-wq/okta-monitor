@@ -5,7 +5,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
-
 # =========================================================
 # 환경변수
 # =========================================================
@@ -21,13 +20,12 @@ BASE_CASH_RATIO = 0.15
 CORE_RATIO_DEFAULT = 0.55
 FUTURE_RATIO_DEFAULT = 0.30
 
-# 미래 섹터는 비슷하게
+# 미래 섹터 수
 FUTURE_SECTOR_COUNT = 4
 
 
 # =========================================================
 # 현재 포트폴리오
-# avg = 달러 평단 / shares = 보유 수량
 # =========================================================
 portfolio = {
     "PANW": {"avg": 160.45, "shares": 8},
@@ -60,16 +58,13 @@ future_map = {
     "로봇": ["PATH", "SYM", "ABB", "ROK"]
 }
 
-all_candidates = sorted(list(set(core_stocks + sum(future_map.values(), []))))
-
-# 통행료 포트폴리오에서 쓰는 대표 페어 로테이션 힌트
 rotation_pairs = {
     "PANW": "V",
     "CRWD": "KMI",
     "OKTA": "UNH",
     "ZS": "COST",
     "AMT": "EQIX",
-    "COIN": "TLT"  # 참고용
+    "COIN": "TLT"
 }
 
 
@@ -129,7 +124,6 @@ def get_history(ticker: str, period="1y"):
 
 
 def get_usdkrw():
-    # fallback 포함
     try:
         close, _ = get_history("KRW=X", period="10d")
         if len(close) > 0:
@@ -150,11 +144,41 @@ def get_usdkrw():
 
 
 # =========================================================
+# 점수 → 등급
+# =========================================================
+def market_grade(score: int):
+    if score >= 5:
+        return "최고의 안전"
+    elif score >= 3:
+        return "안전"
+    elif score >= 1:
+        return "보통"
+    elif score >= -1:
+        return "위험"
+    else:
+        return "엄청위험"
+
+
+def liquidity_grade(score: float):
+    if score >= 2:
+        return "최고의 안전"
+    elif score >= 1:
+        return "안전"
+    elif score >= 0:
+        return "보통"
+    elif score >= -1:
+        return "위험"
+    else:
+        return "엄청위험"
+
+
+# =========================================================
 # 시장 엔진
 # =========================================================
 def market_engine():
     score = 0
     notes = []
+    details = []
 
     try:
         spy_close, _ = get_history("SPY", period="1y")
@@ -162,36 +186,48 @@ def market_engine():
         vix_close, _ = get_history("^VIX", period="3mo")
 
         if len(spy_close) >= 200:
-            spy_ma200 = spy_close.rolling(200).mean().iloc[-1]
-            if spy_close.iloc[-1] > spy_ma200:
+            spy_ma200 = float(spy_close.rolling(200).mean().iloc[-1])
+            spy_now = float(spy_close.iloc[-1])
+
+            if spy_now > spy_ma200:
                 score += 2
                 notes.append("SPY > 200MA")
+                details.append(f"SPY {round(spy_now,2)} > 200MA {round(spy_ma200,2)} : +2")
             else:
                 score -= 2
                 notes.append("SPY < 200MA")
+                details.append(f"SPY {round(spy_now,2)} < 200MA {round(spy_ma200,2)} : -2")
 
         if len(qqq_close) >= 200:
-            qqq_ma200 = qqq_close.rolling(200).mean().iloc[-1]
-            if qqq_close.iloc[-1] > qqq_ma200:
+            qqq_ma200 = float(qqq_close.rolling(200).mean().iloc[-1])
+            qqq_now = float(qqq_close.iloc[-1])
+
+            if qqq_now > qqq_ma200:
                 score += 2
                 notes.append("QQQ > 200MA")
+                details.append(f"QQQ {round(qqq_now,2)} > 200MA {round(qqq_ma200,2)} : +2")
             else:
                 score -= 2
                 notes.append("QQQ < 200MA")
+                details.append(f"QQQ {round(qqq_now,2)} < 200MA {round(qqq_ma200,2)} : -2")
 
         if len(vix_close) > 0:
             vix_now = float(vix_close.iloc[-1])
+
             if vix_now < 18:
                 score += 1
                 notes.append("VIX 안정")
+                details.append(f"VIX {round(vix_now,2)} < 18 : +1")
             elif vix_now > 25:
                 score -= 1
                 notes.append("VIX 위험")
+                details.append(f"VIX {round(vix_now,2)} > 25 : -1")
             else:
-                notes.append("VIX 중간")
+                details.append(f"VIX {round(vix_now,2)} 중간 : 0")
 
     except Exception:
         notes.append("시장 데이터 오류")
+        details.append("시장 데이터 오류")
 
     if score >= 3:
         state = "🟢 Risk ON"
@@ -200,7 +236,13 @@ def market_engine():
     else:
         state = "🟡 Neutral"
 
-    return {"score": score, "state": state, "notes": notes}
+    return {
+        "score": score,
+        "state": state,
+        "grade": market_grade(score),
+        "notes": notes,
+        "details": details
+    }
 
 
 # =========================================================
@@ -209,42 +251,61 @@ def market_engine():
 def liquidity_engine():
     score = 0
     notes = []
+    details = []
 
     try:
         tnx_close, _ = get_history("^TNX", period="6mo")
         if len(tnx_close) >= 21:
-            if tnx_close.iloc[-1] < tnx_close.iloc[-21]:
+            now = float(tnx_close.iloc[-1])
+            prev = float(tnx_close.iloc[-21])
+
+            if now < prev:
                 score += 1
                 notes.append("10년물 금리 하락")
+                details.append(f"10Y {round(prev,2)} → {round(now,2)} : +1")
             else:
                 score -= 1
                 notes.append("10년물 금리 상승")
+                details.append(f"10Y {round(prev,2)} → {round(now,2)} : -1")
     except Exception:
         notes.append("10년물 오류")
+        details.append("10년물 오류")
 
     try:
         dxy_close, _ = get_history("DX-Y.NYB", period="6mo")
         if len(dxy_close) >= 21:
-            if dxy_close.iloc[-1] < dxy_close.iloc[-21]:
+            now = float(dxy_close.iloc[-1])
+            prev = float(dxy_close.iloc[-21])
+
+            if now < prev:
                 score += 1
                 notes.append("달러 약세")
+                details.append(f"DXY {round(prev,2)} → {round(now,2)} : +1")
             else:
                 score -= 1
                 notes.append("달러 강세")
+                details.append(f"DXY {round(prev,2)} → {round(now,2)} : -1")
     except Exception:
         notes.append("달러 오류")
+        details.append("달러 오류")
 
     try:
         gld_close, _ = get_history("GLD", period="6mo")
         if len(gld_close) >= 21:
-            if gld_close.iloc[-1] > gld_close.iloc[-21]:
+            now = float(gld_close.iloc[-1])
+            prev = float(gld_close.iloc[-21])
+
+            if now > prev:
                 score -= 1
                 notes.append("금 강세")
+                details.append(f"GLD {round(prev,2)} → {round(now,2)} : -1")
             else:
                 score += 0.5
                 notes.append("금 안정/약세")
+                details.append(f"GLD {round(prev,2)} → {round(now,2)} : +0.5")
     except Exception:
         notes.append("금 오류")
+        details.append("금 오류")
 
     if score >= 1.5:
         state = "🟢 유동성 우호"
@@ -253,7 +314,13 @@ def liquidity_engine():
     else:
         state = "🟡 유동성 중립"
 
-    return {"score": round(score, 1), "state": state, "notes": notes}
+    return {
+        "score": round(score, 1),
+        "state": state,
+        "grade": liquidity_grade(score),
+        "notes": notes,
+        "details": details
+    }
 
 
 # =========================================================
@@ -367,7 +434,7 @@ def score_stock(ticker: str):
 
 
 # =========================================================
-# 미래 섹터 모멘텀
+# 미래 섹터 엔진
 # =========================================================
 def future_sector_engine():
     results = []
@@ -421,7 +488,7 @@ def future_sector_engine():
 
 
 # =========================================================
-# 현재 포트폴리오 평가
+# 포트폴리오 스냅샷
 # =========================================================
 def portfolio_snapshot(usdkrw: float):
     rows = []
@@ -538,7 +605,7 @@ def target_allocation_engine(market_state: str, liquidity_state: str):
 
 
 # =========================================================
-# 통행료 포트폴리오 분석
+# 통행료 포트폴리오 리포트
 # =========================================================
 def core_portfolio_report(usdkrw: float):
     lines = []
@@ -579,7 +646,6 @@ def core_portfolio_report(usdkrw: float):
             f"손익 {row['pnl_krw']:,}원 ({row['pnl_pct']}%) | {action} | {reason}"
         )
 
-    # 로테이션 힌트
     hints = []
     for src, dst in rotation_pairs.items():
         if src not in portfolio:
@@ -605,13 +671,12 @@ def core_portfolio_report(usdkrw: float):
 
 
 # =========================================================
-# 미래 성장 포트폴리오 분석
+# 미래 성장 포트폴리오 리포트
 # =========================================================
 def future_portfolio_report(usdkrw: float, market_state: str, liquidity_state: str):
     alloc = target_allocation_engine(market_state, liquidity_state)
     sector_scores = future_sector_engine()
 
-    # 각 미래 섹터 대표 종목 선정
     sector_top = {}
     for sector_name, tickers in future_map.items():
         scored = []
@@ -632,7 +697,8 @@ def future_portfolio_report(usdkrw: float, market_state: str, liquidity_state: s
     lines.append("🏭 미래 섹터 점수")
     for item in sector_scores:
         lines.append(
-            f"- {item['sector']} | 종합 {item['final_score']} | 가격 {item['price_score']} | {item['news_summary']} | {item['state']}"
+            f"- {item['sector']} | 종합 {item['final_score']} | 가격 {item['price_score']} | "
+            f"뉴스 {item['news_summary']} | {item['state']}"
         )
 
     lines.append("")
@@ -662,9 +728,8 @@ def future_portfolio_report(usdkrw: float, market_state: str, liquidity_state: s
         current_shares = portfolio.get(ticker, {}).get("shares", 0)
         diff = target_shares - current_shares
 
-        # seed 전략: 최소 1주 있으면 남김
+        # seed 최소 1주
         if current_shares > 0 and diff < 0:
-            # 전량 매도 방지
             if current_shares + diff < 1:
                 diff = -(current_shares - 1)
 
@@ -677,15 +742,13 @@ def future_portfolio_report(usdkrw: float, market_state: str, liquidity_state: s
                 f"- {sector_name} | {ticker} | {abs(diff)}주 매도 제안 | 1주 약 {round(current_price_krw):,}원"
             )
         else:
-            lines.append(
-                f"- {sector_name} | {ticker} | 현재 적정 비중"
-            )
+            lines.append(f"- {sector_name} | {ticker} | 현재 적정 비중")
 
     return "\n".join(lines)
 
 
 # =========================================================
-# 손실 경고 리포트
+# 손실 리포트
 # =========================================================
 def drawdown_report():
     lines = []
@@ -717,17 +780,21 @@ def main():
     liquidity = liquidity_engine()
 
     header_lines = []
-    header_lines.append("📊 AI 투자 시스템 2.0")
+    header_lines.append("📊 AI 투자 시스템 2.1")
     header_lines.append("")
     header_lines.append(f"환율(USD/KRW): {usdkrw:,.0f}원")
     header_lines.append(f"총자산 기준: {TOTAL_KRW:,}원")
     header_lines.append("")
-    header_lines.append(f"시장 상태: {market['state']} (점수 {market['score']})")
-    header_lines.append(f"유동성 상태: {liquidity['state']} (점수 {liquidity['score']})")
+    header_lines.append(f"시장 상태: {market['state']} | 점수 {market['score']} | 등급 {market['grade']}")
+    header_lines.append("📈 시장 세부")
+    for d in market["details"]:
+        header_lines.append(f"- {d}")
+
     header_lines.append("")
-    header_lines.append("💧 유동성 메모")
-    for note in liquidity["notes"][:5]:
-        header_lines.append(f"- {note}")
+    header_lines.append(f"유동성 상태: {liquidity['state']} | 점수 {liquidity['score']} | 등급 {liquidity['grade']}")
+    header_lines.append("💧 유동성 세부")
+    for d in liquidity["details"]:
+        header_lines.append(f"- {d}")
 
     header = "\n".join(header_lines)
     core_report = core_portfolio_report(usdkrw)
