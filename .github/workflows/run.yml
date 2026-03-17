@@ -1,4 +1,4 @@
-name: stock-check
+name: stock-check5
 
 on:
   workflow_dispatch:
