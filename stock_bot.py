@@ -9,16 +9,18 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 SHEET_ID = os.getenv("SHEET_ID")
 
-# 코어 최소 보유
 CORE_MIN_SHARES = {
     "PANW": 5,
     "CRWD": 1,
     "AMT": 1,
     "KMI": 1,
     "UNH": 1,
+    "MSFT": 0,
+    "AMZN": 0,
+    "V": 0,
+    "COST": 0,
 }
 
-# 반대 성향 로테이션 페어
 PAIR_MAP = {
     "PANW": "V",
     "CRWD": "KMI",
@@ -30,15 +32,22 @@ PAIR_MAP = {
 }
 
 DEFAULT_WATCHLIST = [
-    ("NVDA", "AI"),
     ("MSFT", "AI"),
-    ("GLD", "Macro"),
-    ("TLT", "Bond"),
+    ("AMZN", "AI"),
+    ("NVDA", "AI"),
+    ("PANW", "Cyber"),
+    ("CRWD", "Cyber"),
     ("V", "Payment"),
     ("COST", "Retail"),
-    ("EQIX", "Data"),
+    ("AMT", "Infra"),
+    ("EQIX", "Infra"),
     ("MCK", "Healthcare"),
+    ("UNH", "Healthcare"),
+    ("KMI", "Energy"),
     ("CEG", "Energy"),
+    ("GLD", "Macro"),
+    ("TLT", "Bond"),
+    ("COIN", "Crypto"),
     ("LUNR", "Space"),
     ("RKLB", "Space"),
     ("QBTS", "Quantum"),
@@ -46,12 +55,8 @@ DEFAULT_WATCHLIST = [
     ("ROK", "Robotics"),
 ]
 
-FUTURE_SECTORS = {
-    "Quantum": ["QBTS", "IONQ"],
-    "Space": ["LUNR", "RKLB"],
-    "AI": ["NVDA", "MSFT"],
-    "Robotics": ["ROK"],
-}
+ROTATION_SECTORS = {"AI", "Macro", "Bond", "Payment", "Retail", "Infra", "Healthcare", "Energy", "Crypto", "Cyber"}
+FUTURE_SECTORS = {"Space", "Quantum", "Robotics"}
 
 def send_telegram(msg: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -68,9 +73,26 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
         raise ValueError("SHEET_ID secret missing")
     return pd.read_csv(sheet_csv_url(sheet_name))
 
+def normalize_columns(cols):
+    out = []
+    for c in cols:
+        s = str(c).strip().lower()
+        s = s.replace(" ", "_")
+        if s == "share":
+            s = "shares"
+        if s in ["avgprice", "avg_price_(won)", "avg_price_won"]:
+            s = "avg_price"
+        out.append(s)
+    return out
+
+def clean_number(v):
+    s = str(v).strip()
+    s = s.replace(",", "").replace("원", "").replace("$", "")
+    return float(s)
+
 def load_portfolio():
     df = load_sheet("PORTFOLIO")
-    df.columns = [c.strip().lower() for c in df.columns]
+    df.columns = normalize_columns(df.columns)
 
     required = {"ticker", "shares", "avg_price", "type"}
     if not required.issubset(set(df.columns)):
@@ -81,8 +103,8 @@ def load_portfolio():
         ticker = str(row["ticker"]).strip().upper()
         if not ticker or ticker == "NAN":
             continue
-        shares = int(float(row["shares"]))
-        avg_price = float(row["avg_price"])
+        shares = int(clean_number(row["shares"]))
+        avg_price = clean_number(row["avg_price"])
         bucket = str(row["type"]).strip().lower()
         portfolio[ticker] = {
             "shares": shares,
@@ -94,32 +116,30 @@ def load_portfolio():
 def load_settings():
     try:
         df = load_sheet("SETTINGS")
-        df.columns = [c.strip().lower() for c in df.columns]
+        df.columns = normalize_columns(df.columns)
         settings = {}
         for _, row in df.iterrows():
-            key = str(row["key"]).strip()
-            value = row["value"]
-            settings[key] = value
+            settings[str(row["key"]).strip()] = row["value"]
         return {
-            "total_asset": float(settings.get("total_asset", 7000000)),
-            "core_ratio": float(settings.get("core_ratio", 0.60)),
+            "total_asset": float(clean_number(settings.get("total_asset", 7000000))),
+            "core_ratio": float(settings.get("core_ratio", 0.65)),
             "rotation_ratio": float(settings.get("rotation_ratio", 0.25)),
-            "future_ratio": float(settings.get("future_ratio", 0.15)),
-            "min_trade": float(settings.get("min_trade", 200000)),
+            "future_ratio": float(settings.get("future_ratio", 0.10)),
+            "min_trade": float(clean_number(settings.get("min_trade", 200000))),
         }
     except Exception:
         return {
-            "total_asset": 7000000,
-            "core_ratio": 0.60,
+            "total_asset": 7000000.0,
+            "core_ratio": 0.65,
             "rotation_ratio": 0.25,
-            "future_ratio": 0.15,
-            "min_trade": 200000,
+            "future_ratio": 0.10,
+            "min_trade": 200000.0,
         }
 
 def load_watchlist():
     try:
         df = load_sheet("WATCHLIST")
-        df.columns = [c.strip().lower() for c in df.columns]
+        df.columns = normalize_columns(df.columns)
         out = []
         for _, row in df.iterrows():
             ticker = str(row["ticker"]).strip().upper()
@@ -131,7 +151,7 @@ def load_watchlist():
         return DEFAULT_WATCHLIST
 
 def get_history(ticker: str, period="1y"):
-    df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=False)
+    df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=False, threads=False)
     if isinstance(df, pd.DataFrame) and not df.empty:
         close = df["Close"].squeeze().dropna()
         volume = df["Volume"].squeeze().dropna() if "Volume" in df else pd.Series(dtype=float)
@@ -166,11 +186,7 @@ def fred_series(series_id: str):
         return None
     try:
         url = "https://api.stlouisfed.org/fred/series/observations"
-        params = {
-            "series_id": series_id,
-            "api_key": FRED_API_KEY,
-            "file_type": "json",
-        }
+        params = {"series_id": series_id, "api_key": FRED_API_KEY, "file_type": "json"}
         r = requests.get(url, params=params, timeout=20)
         data = r.json()
         vals = []
@@ -204,7 +220,6 @@ def fundamental_status(ticker: str):
         earnings_growth = info.get("earningsQuarterlyGrowth")
         operating_margin = info.get("operatingMargins")
         gross_margin = info.get("grossMargins")
-
         score = 0
 
         if revenue_growth is not None:
@@ -245,7 +260,6 @@ def fundamental_status(ticker: str):
 def market_engine():
     score = 0
     notes = []
-
     try:
         spy, _ = get_history("SPY", "1y")
         qqq, _ = get_history("QQQ", "1y")
@@ -354,7 +368,6 @@ def snapshot(ticker: str, usdkrw: float, portfolio: dict):
     rr = float(rsi(close).iloc[-1]) if len(close) >= 20 else None
     qqq = compare_vs_benchmark(ticker, "QQQ")
     spy = compare_vs_benchmark(ticker, "SPY")
-
     shares = portfolio.get(ticker, {}).get("shares", 0)
     avg = portfolio.get(ticker, {}).get("avg")
     bucket = portfolio.get(ticker, {}).get("type", "")
@@ -379,13 +392,15 @@ def snapshot(ticker: str, usdkrw: float, portfolio: dict):
         "fundamental": f_status,
     }
 
-def tier_from_score(score: int):
-    if score >= 50:
-        return "A급"
-    elif score >= 30:
-        return "B급"
+def grade_from_score(score: int):
+    if score >= 60:
+        return "A+ 강력매수"
+    elif score >= 45:
+        return "A 매수"
+    elif score >= 25:
+        return "B 관망"
     else:
-        return "C급"
+        return "C 제외"
 
 def rate_candidate(ticker: str, sector: str, usdkrw: float, portfolio: dict):
     info = snapshot(ticker, usdkrw, portfolio)
@@ -420,6 +435,7 @@ def rate_candidate(ticker: str, sector: str, usdkrw: float, portfolio: dict):
             reasons.append("QQQ 대비 강함")
         elif info["qqq20"] <= -8:
             score -= 10
+            reasons.append("QQQ 대비 약함")
 
     if info["spy20"] is not None and info["spy20"] >= 2:
         score += 5
@@ -439,13 +455,13 @@ def rate_candidate(ticker: str, sector: str, usdkrw: float, portfolio: dict):
         "ticker": ticker,
         "sector": sector,
         "score": score,
-        "tier": tier_from_score(score),
+        "grade": grade_from_score(score),
         "reason": ", ".join(reasons[:5]),
         "price_krw": info["price_krw"],
         "info": info,
     }
 
-def build_watchlist_recommendations(usdkrw: float, portfolio: dict, watchlist: list):
+def build_scanner(usdkrw: float, portfolio: dict, watchlist: list):
     recs = []
     for ticker, sector in watchlist:
         r = rate_candidate(ticker, sector, usdkrw, portfolio)
@@ -459,15 +475,15 @@ def build_watchlist_recommendations(usdkrw: float, portfolio: dict, watchlist: l
             continue
         src_hot = src_info["rsi"] is not None and src_info["rsi"] >= 68
         dst_dip = dst_info["ma200"] and dst_info["price"] < dst_info["ma200"]
-
         if src_hot and dst_dip:
             for r in recs:
                 if r["ticker"] == dst:
                     r["score"] += 15
-                    r["tier"] = tier_from_score(r["score"])
+                    r["grade"] = grade_from_score(r["score"])
                     r["reason"] = f"{src} 과열 → {dst} 눌림"
 
     recs = sorted(recs, key=lambda x: x["score"], reverse=True)
+
     seen = set()
     final = []
     for r in recs:
@@ -475,7 +491,7 @@ def build_watchlist_recommendations(usdkrw: float, portfolio: dict, watchlist: l
             continue
         seen.add(r["ticker"])
         final.append(r)
-    return final[:12]
+    return final
 
 def current_value_krw(ticker: str, usdkrw: float, portfolio: dict):
     info = snapshot(ticker, usdkrw, portfolio)
@@ -492,14 +508,12 @@ def build_execution_plan(usdkrw: float, market_state: str, liq_state: str, portf
     future_ratio = settings["future_ratio"]
     min_trade = settings["min_trade"]
 
-    # 버킷별 목표 자산
     bucket_targets = {
         "core": total_asset * core_ratio,
         "rotation": total_asset * rotation_ratio,
         "future": total_asset * future_ratio,
     }
 
-    # 현재 버킷별 자산
     bucket_current = {"core": 0, "rotation": 0, "future": 0}
     for ticker in portfolio.keys():
         info = snapshot(ticker, usdkrw, portfolio)
@@ -509,7 +523,6 @@ def build_execution_plan(usdkrw: float, market_state: str, liq_state: str, portf
         if bucket in bucket_current:
             bucket_current[bucket] += info["shares"] * info["price_krw"]
 
-    # 매도 계획
     for ticker in portfolio.keys():
         info = snapshot(ticker, usdkrw, portfolio)
         if not info or info["shares"] <= 0:
@@ -550,40 +563,30 @@ def build_execution_plan(usdkrw: float, market_state: str, liq_state: str, portf
 
     total_sell = sum(x["amount"] for x in sells)
 
-    # 추천 종목
-    recs = build_watchlist_recommendations(usdkrw, portfolio, watchlist)
+    recs = build_scanner(usdkrw, portfolio, watchlist)
 
-    # 유동성 나쁘면 A급만
     if "부담" in liq_state or "Risk OFF" in market_state:
-        recs = [x for x in recs if x["tier"] == "A급"]
+        recs = [x for x in recs if x["grade"] == "A+ 강력매수"]
     else:
-        recs = [x for x in recs if x["tier"] in ["A급", "B급"]]
+        recs = [x for x in recs if x["grade"] in ["A+ 강력매수", "A 매수"]]
 
     remaining = total_sell
 
-    # 버킷 부족분 계산해서 그 범위 내에서 매수
     for r in recs:
         ticker = r["ticker"]
         sector = r["sector"]
 
-        if sector in ["AI", "Macro", "Bond", "Payment", "Retail", "Healthcare", "Data", "Energy"]:
-            target_bucket = "rotation"
-        elif sector in ["Quantum", "Space", "Robotics"]:
-            target_bucket = "future"
-        else:
-            target_bucket = "rotation"
+        target_bucket = "rotation" if sector in ROTATION_SECTORS else "future" if sector in FUTURE_SECTORS else "rotation"
 
         bucket_gap = max(0, bucket_targets[target_bucket] - bucket_current[target_bucket])
-
-        # 종목별 너무 과한 비중 방지
         single_cap = total_asset * (0.08 if target_bucket == "rotation" else 0.03)
         current_val = current_value_krw(ticker, usdkrw, portfolio)
         stock_gap = max(0, single_cap - current_val)
 
         buy_budget = min(bucket_gap, stock_gap, remaining)
         price_krw = r["price_krw"]
-
         qty = math.floor(buy_budget / max(price_krw, 1))
+
         if qty <= 0:
             continue
 
@@ -598,7 +601,7 @@ def build_execution_plan(usdkrw: float, market_state: str, liq_state: str, portf
             "ticker": ticker,
             "qty": qty,
             "amount": round(amount),
-            "tier": r["tier"],
+            "grade": r["grade"],
             "fundamental": r["info"]["fundamental"],
             "sector": sector,
         })
@@ -610,7 +613,7 @@ def header_message(usdkrw: float):
     liq_state, liq_score, liq_notes = liquidity_engine()
 
     lines = []
-    lines.append("📊 AI 자산운용 시스템 v5")
+    lines.append("📊 AI 자산운용 시스템 v7")
     lines.append("")
     lines.append(f"- 환율: {usdkrw:,.0f}원")
     lines.append(f"- 시장: {market_state} | 점수 {market_score}")
@@ -622,30 +625,25 @@ def header_message(usdkrw: float):
 
     return "\n".join(lines), market_state, liq_state
 
-def portfolio_state_message(usdkrw: float, portfolio: dict):
+def portfolio_state_message(portfolio: dict):
     lines = []
     lines.append("🗂 시트에서 읽은 포트폴리오")
     lines.append("")
-
     for ticker, data in portfolio.items():
         lines.append(f"- {ticker} | {data['shares']}주 | 평단 {round(data['avg'])}원 | {data['type']}")
-
     return "\n".join(lines)
 
-def scanner_message(usdkrw: float, portfolio: dict, watchlist: list):
-    recs = build_watchlist_recommendations(usdkrw, portfolio, watchlist)
-
+def scanner_message(scanner: list):
     lines = []
-    lines.append("🚀 종목 스캐너 / 미래섹터 레이더")
+    lines.append("🚀 AI 종목 스캐너")
     lines.append("")
-
-    if not recs:
+    if not scanner:
         lines.append("- 스캔 결과 없음")
         return "\n".join(lines)
 
-    for r in recs[:8]:
+    for r in scanner[:10]:
         lines.append(
-            f"- {r['ticker']} | {r['sector']} | {r['tier']} | 약 {r['price_krw']:,}원 | 실적 {r['info']['fundamental']}"
+            f"- {r['ticker']} | {r['sector']} | {r['grade']} | {r['score']}점 | 약 {r['price_krw']:,}원"
         )
     return "\n".join(lines)
 
@@ -676,7 +674,7 @@ def execution_message(usdkrw: float, market_state: str, liq_state: str, portfoli
     lines.append("[매수]")
     if buys:
         for b in buys:
-            lines.append(f"- {b['ticker']} {b['qty']}주 | 약 {b['amount']:,}원 | {b['tier']} | {b['sector']} | 실적 {b['fundamental']}")
+            lines.append(f"- {b['ticker']} {b['qty']}주 | 약 {b['amount']:,}원 | {b['grade']} | {b['sector']} | 실적 {b['fundamental']}")
     else:
         lines.append("- 없음")
 
@@ -697,9 +695,11 @@ def main():
     usdkrw = get_usdkrw()
 
     header, market_state, liq_state = header_message(usdkrw)
+    scanner = build_scanner(usdkrw, portfolio, watchlist)
+
     send_telegram(header)
-    send_telegram(portfolio_state_message(usdkrw, portfolio))
-    send_telegram(scanner_message(usdkrw, portfolio, watchlist))
+    send_telegram(portfolio_state_message(portfolio))
+    send_telegram(scanner_message(scanner))
 
     exe = execution_message(usdkrw, market_state, liq_state, portfolio, settings, watchlist)
     if exe:
