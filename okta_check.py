@@ -29,7 +29,7 @@ BUY_PCT_SCORES = {"-10%": 5, "-20%": 10, "-30%": 15, "-40%": 20, "-50%": 25, "-6
 SELL_PCT_SCORES = {"+20%": 5, "+40%": 10, "+60%": 15, "+80%": 20, "+100%": 25}
 
 
-    import pandas as pd
+import pandas as pd
 import requests
 
 def get_sp500():
