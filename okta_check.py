@@ -434,6 +434,7 @@ def main():
     else:
         print("신규 신호 없음 - 텔레그램 발송 안 함")
 
-
 if __name__ == "__main__":
     main()
+    send_telegram_message("📡 텔레그램 테스트 메시지 정상 작동")
+
