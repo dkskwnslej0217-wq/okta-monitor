@@ -37,7 +37,82 @@ def load_portfolio():
     return df
 
 
-def get_signal(ticker: str):
+def get_close_series(df: pd.DataFrame) -> pd.Series:
+    close = df["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    return close.dropna()
+
+
+def safe_last(series: pd.Series, window: int):
+    rolled = series.rolling(window).mean()
+    value = rolled.iloc[-1]
+    if pd.isna(value):
+        return None
+    return float(value)
+
+
+def recent_weakness(close: pd.Series) -> bool:
+    if len(close) < 21:
+        return False
+    ret_20 = float(close.pct_change(20).iloc[-1])
+    return ret_20 < -0.08
+
+
+def get_type_weights(asset_type: str):
+    asset_type = str(asset_type).strip().lower()
+
+    if asset_type == "core":
+        return {
+            "ma200": 10,
+            "ma240": 15,
+            "ma365": 20,
+            "recent_weak": 10,
+            "status_map": [
+                (65, "정리 검토"),
+                (45, "감축 검토"),
+                (25, "주의"),
+                (0, "관망"),
+            ],
+        }
+
+    if asset_type == "rotation":
+        return {
+            "ma200": 15,
+            "ma240": 20,
+            "ma365": 20,
+            "recent_weak": 15,
+            "status_map": [
+                (60, "정리 검토"),
+                (40, "감축 검토"),
+                (20, "주의"),
+                (0, "관망"),
+            ],
+        }
+
+    # future / 그 외
+    return {
+        "ma200": 20,
+        "ma240": 20,
+        "ma365": 20,
+        "recent_weak": 15,
+        "status_map": [
+            (55, "정리 검토"),
+            (35, "감축 검토"),
+            (15, "주의"),
+            (0, "관망"),
+        ],
+    }
+
+
+def classify_status(score: int, status_map):
+    for threshold, label in status_map:
+        if score >= threshold:
+            return label
+    return "관망"
+
+
+def get_signal(ticker: str, asset_type: str):
     df = yf.download(
         ticker,
         period="2y",
@@ -46,51 +121,105 @@ def get_signal(ticker: str):
         progress=False,
     )
 
-    if df.empty or len(df) < 240:
+    if df.empty or len(df) < 200:
         return {
             "score": 0,
             "status": "데이터 부족",
             "reason": "가격 데이터 부족",
         }
 
-    close_series = df["Close"]
-    if isinstance(close_series, pd.DataFrame):
-        close_series = close_series.iloc[:, 0]
+    close = get_close_series(df)
+    if len(close) < 200:
+        return {
+            "score": 0,
+            "status": "데이터 부족",
+            "reason": "가격 데이터 부족",
+        }
 
-    close = float(close_series.iloc[-1])
-    ma200 = float(close_series.rolling(200).mean().iloc[-1])
-    ma240 = float(close_series.rolling(240).mean().iloc[-1])
+    last_close = float(close.iloc[-1])
+    ma200 = safe_last(close, 200)
+    ma240 = safe_last(close, 240)
+    ma365 = safe_last(close, 365)
+
+    weights = get_type_weights(asset_type)
 
     score = 0
     reasons = []
 
-    if close < ma200:
-        score += 30
+    if ma200 is not None and last_close < ma200:
+        score += weights["ma200"]
         reasons.append("200일선 이탈")
 
-    if close < ma240:
-        score += 25
+    if ma240 is not None and last_close < ma240:
+        score += weights["ma240"]
         reasons.append("240일선 이탈")
 
-    recent_20 = float(close_series.pct_change(20).iloc[-1])
-    if recent_20 < -0.08:
-        score += 20
+    if ma365 is not None and last_close < ma365:
+        score += weights["ma365"]
+        reasons.append("365일선 이탈")
+
+    if recent_weakness(close):
+        score += weights["recent_weak"]
         reasons.append("최근 20일 약세")
 
-    if score >= 70:
-        status = "정리 검토"
-    elif score >= 40:
-        status = "감축 검토"
-    elif score >= 20:
-        status = "주의"
-    else:
-        status = "관망"
+    status = classify_status(score, weights["status_map"])
 
     return {
         "score": score,
         "status": status,
         "reason": ", ".join(reasons) if reasons else "추세 양호",
     }
+
+
+def build_message(df: pd.DataFrame):
+    lines = ["⚠️ 보유 종목 위험 스캔 v20", ""]
+
+    core_lines = []
+    rotation_lines = []
+    future_lines = []
+
+    for _, row in df.iterrows():
+        ticker = str(row.get("ticker", "")).strip().upper()
+        asset_type = str(row.get("type", "")).strip().lower()
+
+        if not ticker or ticker == "NAN":
+            continue
+
+        result = get_signal(ticker, asset_type)
+        line = (
+            f"- {ticker} | {asset_type or 'unknown'} | "
+            f"위험점수 {result['score']} | {result['status']} | {result['reason']}"
+        )
+
+        if asset_type == "core":
+            if result["score"] >= 25:
+                core_lines.append(line)
+        elif asset_type == "rotation":
+            if result["score"] >= 20:
+                rotation_lines.append(line)
+        else:
+            if result["score"] >= 15:
+                future_lines.append(line)
+
+    if core_lines:
+        lines.append("[CORE]")
+        lines.extend(core_lines)
+        lines.append("")
+
+    if rotation_lines:
+        lines.append("[ROTATION]")
+        lines.extend(rotation_lines)
+        lines.append("")
+
+    if future_lines:
+        lines.append("[FUTURE]")
+        lines.extend(future_lines)
+        lines.append("")
+
+    if not core_lines and not rotation_lines and not future_lines:
+        lines.append("- 위험 경고 종목 없음")
+
+    return "\n".join(lines)
 
 
 def main():
@@ -104,26 +233,11 @@ def main():
         send_telegram("PORTFOLIO 시트에 ticker 컬럼이 없습니다.")
         return
 
-    lines = ["⚠️ 포트폴리오 위험 스캔", ""]
-    alert_count = 0
+    if "type" not in pf.columns:
+        pf["type"] = "rotation"
 
-    for _, row in pf.iterrows():
-        ticker = str(row["ticker"]).strip().upper()
-        if not ticker or ticker == "NAN":
-            continue
-
-        result = get_signal(ticker)
-
-        if result["score"] >= 20:
-            alert_count += 1
-            lines.append(
-                f"- {ticker} | 위험점수 {result['score']} | {result['status']} | {result['reason']}"
-            )
-
-    if alert_count == 0:
-        lines.append("- 위험 경고 종목 없음")
-
-    send_telegram("\n".join(lines))
+    message = build_message(pf)
+    send_telegram(message)
 
 
 if __name__ == "__main__":
